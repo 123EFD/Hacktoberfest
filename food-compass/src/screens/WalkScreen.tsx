@@ -60,7 +60,7 @@ export const WalkScreen: React.FC<{ target: EateryTarget; onCancel: () => void }
             />
 
             {/* 3. Bottom Action Controls */}
-            <div className="flex flex-col items-center gap-3">
+            <div className="flex flex-col items-center gap-2.5">
                 <PocketModeOverlay
                     isActive={pocketMode}
                     onToggle={() => setPocketMode(!pocketMode)}
@@ -68,6 +68,18 @@ export const WalkScreen: React.FC<{ target: EateryTarget; onCancel: () => void }
                 />
 
                 <button
+                    type="button"
+                    onClick={() => {
+                        playArrivalChime();
+                        speakArrival(target.name, target.signatureDish);
+                    }}
+                    className="text-[11px] text-emerald-400 hover:text-emerald-300 bg-emerald-950/50 border border-emerald-800/60 px-3.5 py-1.5 rounded-full transition-all active:scale-95 shadow-sm"
+                >
+                    🔔 Test Arrival Chime & Voice
+                </button>
+
+                <button
+                    type="button"
                     onClick={onCancel}
                     className="text-xs text-slate-500 hover:text-slate-400 py-1 transition-colors"
                 >
