@@ -188,6 +188,9 @@ export function useSensors(targetLocation?: Coordinates | null) {
   let targetBearing = 0;
   let needleAngle = 0; // Relative angle to point the compass arrow
   let isFacingTarget = false;
+  let turnDirection: 'left' | 'right' | 'straight' | 'wrong_way' = 'straight';
+  const minDistanceRef = useRef<number | null>(null);
+  const [isDrifting, setIsDrifting] = useState(false);
 
   if (sensorState.userLocation && targetLocation) {
     distanceMeters = calculateDistance(sensorState.userLocation, targetLocation);
@@ -198,7 +201,28 @@ export function useSensors(targetLocation?: Coordinates | null) {
 
     // "Aligned" if the phone is pointing within ±15 degrees of the target
     isFacingTarget = needleAngle <= 15 || needleAngle >= 345;
+
+    // Determine street-level turn direction
+    if (needleAngle > 15 && needleAngle <= 140) {
+      turnDirection = 'right';
+    } else if (needleAngle > 220 && needleAngle < 345) {
+      turnDirection = 'left';
+    } else if (needleAngle > 140 && needleAngle <= 220) {
+      turnDirection = 'wrong_way';
+    }
   }
+
+  // Drift Guard: Check if distance increases by > 20m from best-recorded distance
+  useEffect(() => {
+    if (distanceMeters > 0) {
+      if (minDistanceRef.current === null || distanceMeters < minDistanceRef.current) {
+        minDistanceRef.current = distanceMeters;
+        setIsDrifting(false);
+      } else if (distanceMeters > minDistanceRef.current + 20) {
+        setIsDrifting(true);
+      }
+    }
+  }, [distanceMeters]);
 
   // Handle Haptic Walking Feedback Loop
   useEffect(() => {
@@ -223,8 +247,50 @@ export function useSensors(targetLocation?: Coordinates | null) {
     targetBearing,
     needleAngle,
     isFacingTarget,
+    turnDirection,
+    isDrifting,
     requestCompassPermission,
   };
+}
+
+/**
+ * 5b. TACTILE THIGH HAPTICS (Felt Directly on the Leg)
+ * Distinct vibration rhythms that can be felt through pocket fabric
+ */
+export async function triggerThighHaptics(
+  direction: 'left' | 'right' | 'straight' | 'wrong_way'
+) {
+  try {
+    if (direction === 'left') {
+      // 2 pulses = Left (Tap - Tap)
+      await Haptics.impact({ style: ImpactStyle.Heavy });
+      setTimeout(async () => {
+        await Haptics.impact({ style: ImpactStyle.Heavy });
+      }, 150);
+    } else if (direction === 'right') {
+      // 3 pulses = Right (Tap - Tap - Tap)
+      await Haptics.impact({ style: ImpactStyle.Medium });
+      setTimeout(async () => {
+        await Haptics.impact({ style: ImpactStyle.Medium });
+      }, 100);
+      setTimeout(async () => {
+        await Haptics.impact({ style: ImpactStyle.Medium });
+      }, 200);
+    } else if (direction === 'wrong_way') {
+      // Harsh rumble for wrong way / drift
+      await Haptics.notification({ type: NotificationType.Error });
+    } else {
+      // 1 gentle click = Straight / Aligned
+      await Haptics.impact({ style: ImpactStyle.Light });
+    }
+  } catch {
+    if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+      if (direction === 'left') navigator.vibrate([120, 80, 120]);
+      else if (direction === 'right') navigator.vibrate([50, 50, 50, 50, 50]);
+      else if (direction === 'wrong_way') navigator.vibrate([350, 100, 350]);
+      else navigator.vibrate(30);
+    }
+  }
 }
 
 // -------------------------------------------------------------
