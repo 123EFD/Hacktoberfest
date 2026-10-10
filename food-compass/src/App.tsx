@@ -60,9 +60,9 @@ export default function App() {
         preferences
       );
 
-      const dish = result.eatery.cuisine
-        ? `${result.eatery.cuisine} Special`
-        : 'Chef Special';
+      const dish =
+        result.signatureDishOverride ||
+        (result.eatery.cuisine ? `${result.eatery.cuisine} Special` : 'Chef Special');
 
       let reason = result.eatery.outdoor_seating
         ? 'Verified breezy outdoor seating with high foot traffic.'
@@ -82,9 +82,8 @@ export default function App() {
       setStatusMessage(null);
     } catch (err) {
       console.error(err);
-      setStatusMessage(
-        'Could not find eateries matching your criteria nearby. Please ensure GPS is active and try again.'
-      );
+      const msg = err instanceof Error ? err.message : String(err);
+      setStatusMessage(`Notice: ${msg}`);
     } finally {
       setIsLoading(false);
     }
