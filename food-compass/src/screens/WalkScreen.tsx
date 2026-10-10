@@ -29,7 +29,6 @@ export const WalkScreen: React.FC<{ target: EateryTarget; onCancel: () => void }
 }) => {
   const [pocketMode, setPocketMode] = useState(false);
   const [audioMode, setAudioMode] = useState<'pocket_speaker' | 'earbuds'>('pocket_speaker');
-  const [showTestControls, setShowTestControls] = useState(false);
 
   const hasTriggeredArrivalSound = useRef(false);
   const prevTurnDirectionRef = useRef<TurnDirection>('straight');
@@ -87,19 +86,6 @@ export const WalkScreen: React.FC<{ target: EateryTarget; onCancel: () => void }
     }
   }, [isDrifting]);
 
-  // Simulation handlers for instant hardware verification
-  const handleSimulateTurn = (dir: TurnDirection) => {
-    if (audioMode === 'earbuds') {
-      const mockAngle = dir === 'right' ? 75 : dir === 'left' ? 285 : 0;
-      playSpatialDirectionChime(mockAngle);
-      speakJunctionWhisper(mockAngle);
-    } else {
-      playPocketMelodicChime(dir);
-      speakPunchyVoicePrompt(dir);
-      triggerThighHaptics(dir);
-    }
-  };
-
   return (
     <div className="relative flex flex-col items-center justify-between min-h-screen bg-slate-950 text-white overflow-hidden pb-6 select-none">
       {/* 1. Top Vibe Card */}
@@ -147,66 +133,13 @@ export const WalkScreen: React.FC<{ target: EateryTarget; onCancel: () => void }
         onRequestPermission={requestCompassPermission}
       />
 
-      {/* 3. Bottom Action Controls & Sensory Test Panel */}
-      <div className="flex flex-col items-center gap-2.5 w-full max-w-xs px-4">
+      {/* 3. Bottom Action Controls */}
+      <div className="flex flex-col items-center gap-3 w-full max-w-xs px-4">
         <PocketModeOverlay
           isActive={pocketMode}
           onToggle={() => setPocketMode(!pocketMode)}
           isFacingTarget={isFacingTarget}
         />
-
-        {/* Collapsible Sensory Hardware Test Controls */}
-        <button
-          type="button"
-          onClick={() => setShowTestControls(!showTestControls)}
-          className="text-[11px] text-slate-400 hover:text-emerald-400 underline underline-offset-4 transition-colors"
-        >
-          {showTestControls ? '▲ Hide Sensor Simulators' : '▼ Test Turns & Audio Cues'}
-        </button>
-
-        {showTestControls && (
-          <div className="w-full bg-slate-900/90 border border-slate-800 rounded-2xl p-3 flex flex-col gap-1.5 shadow-2xl animate-fadeIn">
-            <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold text-center mb-1">
-              Simulate Street Situations
-            </div>
-            <div className="grid grid-cols-2 gap-1.5">
-              <button
-                type="button"
-                onClick={() => handleSimulateTurn('left')}
-                className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-amber-300 rounded-xl text-[11px] font-bold border border-slate-700"
-              >
-                ⬅️ Left Turn (2 Pulses)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleSimulateTurn('right')}
-                className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-emerald-300 rounded-xl text-[11px] font-bold border border-slate-700"
-              >
-                ➡️ Right Turn (3 Pulses)
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  playDriftWarningSound();
-                  triggerThighHaptics('wrong_way');
-                }}
-                className="py-1.5 px-2 bg-rose-950/60 hover:bg-rose-900/60 text-rose-300 rounded-xl text-[11px] font-bold border border-rose-800"
-              >
-                ⚠️ Drift Guard Alert
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  playArrivalChime();
-                  speakArrival(target.name, target.signatureDish);
-                }}
-                className="py-1.5 px-2 bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-300 rounded-xl text-[11px] font-bold border border-emerald-800"
-              >
-                🔔 Arrival Chime
-              </button>
-            </div>
-          </div>
-        )}
 
         <button
           type="button"

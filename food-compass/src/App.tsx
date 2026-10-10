@@ -1,12 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { WalkScreen } from './screens/WalkScreen';
 import {
   searchWithPreferenceFallback,
   type FoodPreferences,
 } from './services/osmServices';
 import { useSensors } from './hooks/useSensors';
-import { playArrivalChime, speakArrival } from './services/soundFeedback';
-import { Haptics, ImpactStyle } from '@capacitor/haptics';
 
 interface EateryTarget {
   name: string;
@@ -20,7 +18,21 @@ export default function App() {
   const [activeTarget, setActiveTarget] = useState<EateryTarget | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [testStatus, setTestStatus] = useState<string | null>(null);
+  const [isOnline, setIsOnline] = useState(
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+
+  // Monitor online / offline connection status
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   // User Food Preferences
   const [preferences, setPreferences] = useState<FoodPreferences>({
@@ -30,54 +42,6 @@ export default function App() {
 
   // Hook into sensors for user's starting GPS location
   const { userLocation, permissionGranted, requestCompassPermission } = useSensors();
-
-  // Instant hardware verification for Audio & Vibration
-  const handleTestSensors = async () => {
-    setTestStatus('Testing vibration & audio...');
-    try {
-      await Haptics.impact({ style: ImpactStyle.Heavy });
-    } catch {
-      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
-        navigator.vibrate([100, 50, 100]);
-      }
-    }
-    playArrivalChime();
-    speakArrival('Test Kitchen', 'Crispy Noodles');
-
-    setTimeout(() => {
-      setTestStatus('✓ Haptic pulse, chime & speech triggered successfully!');
-      setTimeout(() => setTestStatus(null), 3500);
-    }, 500);
-  };
-
-  // Launch a demo stroll based on current location (or default coordinates)
-  const startDemoStroll = () => {
-    const baseLat = userLocation?.lat ?? 37.7749;
-    const baseLng = userLocation?.lng ?? -122.4194;
-
-    const dishName =
-      preferences.diet === 'halal'
-        ? 'Charcoal Grilled Satay & Biryani'
-        : preferences.diet === 'vegetarian'
-        ? 'Wild Mushroom Claypot Rice'
-        : 'Crispy Chili Oil Biang Biang';
-
-    const restaurantName =
-      preferences.diet === 'halal'
-        ? 'Restoran Bismillah Garden'
-        : preferences.diet === 'vegetarian'
-        ? 'Lotus Leaf Vegetarian Kitchen'
-        : "Aunty Mei's Hand-Pulled Noodles";
-
-    setActiveTarget({
-      name: restaurantName,
-      lat: baseLat + 0.0022,
-      lng: baseLng + 0.0018,
-      signatureDish: dishName,
-      verdictReason:
-        'Lively outdoor courtyard, verified high local turnover, perfectly aligned with your preferences.',
-    });
-  };
 
   // Discover live nearby eateries with automatic preference fallback
   const handleFindStroll = async () => {
@@ -118,8 +82,9 @@ export default function App() {
       setStatusMessage(null);
     } catch (err) {
       console.error(err);
-      setStatusMessage('Could not find places via live GPS. Launching demo walk instead...');
-      startDemoStroll();
+      setStatusMessage(
+        'Could not find eateries matching your criteria nearby. Please ensure GPS is active and try again.'
+      );
     } finally {
       setIsLoading(false);
     }
@@ -142,8 +107,24 @@ export default function App() {
     <main className="flex flex-col items-center justify-between min-h-screen p-5 bg-slate-950 text-white select-none">
       {/* Header */}
       <header className="w-full text-center pt-6">
-        <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-800 text-emerald-400 text-xs font-semibold uppercase tracking-wider mb-3">
-          <span>🌿</span> Touch Grass Edition
+        <div className="flex items-center justify-center gap-2 mb-3">
+          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-800 text-emerald-400 text-xs font-semibold uppercase tracking-wider">
+            <span>🌿</span> Touch Grass
+          </div>
+          <div
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${
+              isOnline
+                ? 'bg-slate-900/80 border-slate-800 text-slate-300'
+                : 'bg-amber-950/80 border-amber-800 text-amber-300 animate-pulse'
+            }`}
+          >
+            <span
+              className={`w-2 h-2 rounded-full ${
+                isOnline ? 'bg-emerald-400' : 'bg-amber-400'
+              }`}
+            />
+            {isOnline ? 'PWA Offline Ready' : '⚡ Offline Mode (Sensors Active)'}
+          </div>
         </div>
         <h1 className="text-3xl font-black tracking-tight text-white mb-1.5">FoodCompass</h1>
         <p className="text-xs text-slate-400 max-w-xs mx-auto leading-relaxed">
@@ -232,33 +213,10 @@ export default function App() {
         <button
           onClick={handleFindStroll}
           disabled={isLoading}
-          className="w-full py-3.5 px-6 bg-emerald-600 hover:bg-emerald-500 text-white font-black rounded-2xl text-sm shadow-lg shadow-emerald-600/25 active:scale-95 transition-all disabled:opacity-50"
+          className="w-full py-4 px-6 bg-emerald-600 hover:bg-emerald-500 text-white font-black rounded-2xl text-base shadow-lg shadow-emerald-600/25 active:scale-95 transition-all disabled:opacity-50"
         >
           {isLoading ? 'Scanning Local Vibe...' : '🚶 Find Best Food Walk (800m)'}
         </button>
-
-        {/* Demo Mode Action */}
-        <button
-          onClick={startDemoStroll}
-          className="w-full py-3 px-6 bg-slate-900 hover:bg-slate-800 text-slate-200 font-semibold rounded-2xl text-xs border border-slate-800 active:scale-95 transition-all"
-        >
-          🎯 Test Walk (Demo Target ~250m)
-        </button>
-
-        {/* Instant Hardware Test Button */}
-        <button
-          onClick={handleTestSensors}
-          className="w-full py-2.5 px-4 bg-slate-900/60 hover:bg-slate-800 text-slate-400 hover:text-emerald-400 font-medium rounded-xl text-xs border border-slate-800/80 active:scale-95 transition-all"
-        >
-          🔔 Test Haptics & Audio Chime
-        </button>
-
-        {/* Status / Fallback Alerts */}
-        {testStatus && (
-          <p className="text-xs text-center text-emerald-400 bg-emerald-950/40 border border-emerald-800/50 p-2.5 rounded-xl animate-fadeIn">
-            {testStatus}
-          </p>
-        )}
 
         {statusMessage && (
           <p className="text-xs text-center text-amber-300 bg-amber-950/40 border border-amber-900/50 p-2.5 rounded-xl">
