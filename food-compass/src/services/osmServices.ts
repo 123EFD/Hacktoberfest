@@ -40,32 +40,85 @@ interface OverpassResponse {
   elements: OverpassElement[];
 }
 
-// Global Overpass mirrors to ensure zero downtime and prevent 406 / rate limit errors
+// Secondary Overpass mirrors (excluding the unresponsive overpass-api.de instance)
 const OVERPASS_MIRRORS = [
-  'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.osm.ch/api/interpreter',
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
 ];
 
+interface NominatimItem {
+  place_id: number;
+  name?: string;
+  display_name?: string;
+  lat: string;
+  lon: string;
+  extratags?: Record<string, string | undefined>;
+}
+
 export async function fetchNearbyEateries(lat: number, lon: number, radiusMeters = 800): Promise<NearbyEatery[]> {
-  const query = `[out:json][timeout:15];(node["amenity"~"restaurant|cafe|fast_food"](around:${radiusMeters},${lat},${lon});way["amenity"~"restaurant|cafe|fast_food"](around:${radiusMeters},${lat},${lon}););out center 40;`;
+  // 1. PRIMARY: High-Speed OpenStreetMap Nominatim Search API (< 1s response time)
+  try {
+    const boxDeg = radiusMeters / 111000;
+    const viewbox = `${(lon - boxDeg).toFixed(6)},${(lat + boxDeg).toFixed(6)},${(lon + boxDeg).toFixed(6)},${(lat - boxDeg).toFixed(6)}`;
+    const nominatimUrl = `https://nominatim.openstreetmap.org/search?format=json&extratags=1&addressdetails=1&q=restaurant&viewbox=${viewbox}&bounded=1&limit=40`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3500);
+    const response = await fetch(nominatimUrl, {
+      headers: {
+        'Accept': 'application/json',
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (response.ok) {
+      const items: NominatimItem[] = await response.json();
+      if (Array.isArray(items) && items.length > 0) {
+        return items.map((item) => {
+          const tags = item.extratags || {};
+          const cleanName = item.name || (item.display_name ? item.display_name.split(',')[0].trim() : 'Local Eatery');
+          const cuisine = tags.cuisine || (tags['diet:halal'] === 'yes' ? 'Halal' : 'Local Food');
+          return {
+            id: Number(item.place_id) || Math.floor(Math.random() * 100000),
+            name: cleanName,
+            cuisine: cuisine,
+            outdoor_seating: tags.outdoor_seating === 'yes',
+            lat: parseFloat(item.lat),
+            lon: parseFloat(item.lon),
+            tags: tags,
+          };
+        });
+      }
+    }
+  } catch (nomErr) {
+    console.warn('Primary Nominatim query bypassed, attempting Overpass backup...', nomErr);
+  }
+
+  // 2. BACKUP: Overpass API with strict 3-second timeout
+  const query = `[out:json][timeout:6];(node["amenity"~"restaurant|cafe|fast_food"](around:${radiusMeters},${lat},${lon});way["amenity"~"restaurant|cafe|fast_food"](around:${radiusMeters},${lat},${lon}););out center 30;`;
 
   for (const mirror of OVERPASS_MIRRORS) {
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
       const url = `${mirror}?data=${encodeURIComponent(query)}`;
       const response = await fetch(url, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
         },
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         continue;
       }
 
       const data: OverpassResponse = await response.json();
-      if (!data.elements) continue;
+      if (!data.elements || data.elements.length === 0) continue;
 
       return data.elements.map((el: OverpassElement) => ({
         id: el.id,
@@ -77,12 +130,11 @@ export async function fetchNearbyEateries(lat: number, lon: number, radiusMeters
         tags: el.tags,
       }));
     } catch {
-      // Try next mirror if this one fails or times out
       continue;
     }
   }
 
-  // If all mirrors fail, return an empty array rather than crashing the app
+  // If live providers fail or device is offline, return empty list for instant localized generator
   return [];
 }
 
@@ -188,12 +240,24 @@ export function filterByPreferences(eateries: NearbyEatery[], prefs: FoodPrefere
   });
 }
 
+function calculateDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371e3;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c);
+}
+
 /**
  * Searches with resilient automatic fallback:
  * Tier 1: Check 800m with user preference
  * Tier 2: Check 1500m with user preference
- * Tier 3: Check 2500m with user preference or closest general eatery
- * Tier 4: Zero-failure localized target generator if zone is completely unmapped
+ * Tier 3: Closest general eatery within radius
+ * Tier 4: Zero-failure localized target generator if zone is completely unmapped or APIs are busy
  */
 export async function searchWithPreferenceFallback(
   lat: number,
@@ -204,8 +268,18 @@ export async function searchWithPreferenceFallback(
   const spiceLabel = prefs.spice !== 'any' ? `${prefs.spice}` : '';
   const label = [dietLabel, spiceLabel].filter(Boolean).join(' / ');
 
+  // Single unified fetch for up to 1500m radius to eliminate cascading network timeouts
+  const allEateries = await fetchNearbyEateries(lat, lon, 1500);
+
+  const withDist = allEateries
+    .map((e) => ({
+      ...e,
+      distance: calculateDistanceMeters(lat, lon, e.lat, e.lon),
+    }))
+    .sort((a, b) => a.distance - b.distance);
+
   // Tier 1: Search within 800m
-  const local800 = await fetchNearbyEateries(lat, lon, 800);
+  const local800 = withDist.filter((e) => e.distance <= 800);
   const matched800 = filterByPreferences(local800, prefs);
 
   if (matched800.length > 0) {
@@ -218,9 +292,7 @@ export async function searchWithPreferenceFallback(
   }
 
   // Tier 2: Expand to 1500m
-  const local1500 = await fetchNearbyEateries(lat, lon, 1500);
-  const matched1500 = filterByPreferences(local1500, prefs);
-
+  const matched1500 = filterByPreferences(withDist, prefs);
   if (matched1500.length > 0) {
     const selected = matched1500.find((e) => e.outdoor_seating) || matched1500[0];
     return {
@@ -231,26 +303,9 @@ export async function searchWithPreferenceFallback(
     };
   }
 
-  // Tier 3: Expand to 2500m if a specific preference is set
-  if (prefs.diet !== 'all' || prefs.spice !== 'any') {
-    const local2500 = await fetchNearbyEateries(lat, lon, 2500);
-    const matched2500 = filterByPreferences(local2500, prefs);
-
-    if (matched2500.length > 0) {
-      const selected = matched2500.find((e) => e.outdoor_seating) || matched2500[0];
-      return {
-        eatery: selected,
-        isFallback: true,
-        distanceTier: '1500m',
-        fallbackMessage: `Notice: Found ${label} match in extended walking radius (~2km)!`,
-      };
-    }
-  }
-
-  // Tier 4: General Eatery Fallback (use closest eatery from any tier)
-  const allGeneral = [...local800, ...local1500];
-  if (allGeneral.length > 0) {
-    const fallbackEatery = allGeneral.find((e) => e.outdoor_seating) || allGeneral[0];
+  // Tier 3: General Eatery Fallback (use closest eatery from any tier)
+  if (withDist.length > 0) {
+    const fallbackEatery = withDist.find((e) => e.outdoor_seating) || withDist[0];
     return {
       eatery: fallbackEatery,
       isFallback: true,
@@ -259,7 +314,7 @@ export async function searchWithPreferenceFallback(
     };
   }
 
-  // Tier 5: Zero-Failure Localized Target (for unmapped suburbs or test coordinates)
+  // Tier 4: Zero-Failure Localized Target (for unmapped suburbs, busy servers, or offline)
   const fallbackName =
     prefs.diet === 'halal'
       ? 'Restoran Bismillah & Grill'
@@ -285,7 +340,7 @@ export async function searchWithPreferenceFallback(
     },
     isFallback: true,
     distanceTier: 'fallback_general',
-    fallbackMessage: `Notice: OpenStreetMap has limited tags in this immediate spot. Generated walking compass to closest dining district.`,
+    fallbackMessage: `Notice: OpenStreetMap servers are currently busy. Generated walking compass to closest dining spot.`,
     signatureDishOverride: fallbackDish,
   } as EaterySearchResult & { signatureDishOverride?: string };
 }

@@ -1,6 +1,6 @@
 // src/screens/WalkScreen.tsx
 import React, { useState, useEffect, useRef } from 'react';
-import { useSensors, triggerThighHaptics } from '../hooks/useSensors';
+import { useSensors, triggerThighHaptics, type Coordinates } from '../hooks/useSensors';
 import { CompassView } from '../components/CompassView';
 import { VibePill } from '../components/VibePill';
 import { PocketModeOverlay } from '../components/PocketModeOverlay';
@@ -23,10 +23,11 @@ interface EateryTarget {
   verdictReason: string;
 }
 
-export const WalkScreen: React.FC<{ target: EateryTarget; onCancel: () => void }> = ({
-  target,
-  onCancel,
-}) => {
+export const WalkScreen: React.FC<{
+  target: EateryTarget;
+  onCancel: () => void;
+  initialUserLocation?: Coordinates | null;
+}> = ({ target, onCancel, initialUserLocation }) => {
   const [pocketMode, setPocketMode] = useState(false);
   const [audioMode, setAudioMode] = useState<'pocket_speaker' | 'earbuds'>('pocket_speaker');
 
@@ -43,7 +44,7 @@ export const WalkScreen: React.FC<{ target: EateryTarget; onCancel: () => void }
     isDrifting,
     permissionGranted,
     requestCompassPermission,
-  } = useSensors({ lat: target.lat, lng: target.lng });
+  } = useSensors({ lat: target.lat, lng: target.lng }, initialUserLocation);
 
   // 1. Arrival Trigger (<= 35m)
   useEffect(() => {

@@ -6,7 +6,6 @@ Features:
 */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Geolocation, type Position } from '@capacitor/geolocation';
 import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
 
 interface WebKitDeviceOrientationEvent extends DeviceOrientationEvent {
@@ -30,9 +29,25 @@ export interface SensorState {
   error: string | null;
 }
 
-export function useSensors(targetLocation?: Coordinates | null) {
+// Cache location globally so switching screens doesn't lose position
+let globalLastKnownLocation: Coordinates | null = null;
+
+function fetchBrowserPosition(options: PositionOptions): Promise<GeolocationPosition> {
+  return new Promise((resolve, reject) => {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      reject(new Error('Geolocation is not supported by your browser or environment.'));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(resolve, reject, options);
+  });
+}
+
+export function useSensors(
+  targetLocation?: Coordinates | null,
+  initialUserLocation?: Coordinates | null
+) {
   const [sensorState, setSensorState] = useState<SensorState>({
-    userLocation: null,
+    userLocation: initialUserLocation || globalLastKnownLocation || null,
     heading: 0,
     accuracy: null,
     permissionGranted: false,
@@ -85,7 +100,124 @@ export function useSensors(targetLocation?: Coordinates | null) {
   };
 
   // -------------------------------------------------------------
-  // 2. HAPTICS HELPERS
+  // 2. MULTI-TIER GPS ACQUISITION (HIGH-ACCURACY -> NETWORK -> IP)
+  // -------------------------------------------------------------
+  const acquireLocation = useCallback(async (): Promise<Coordinates | null> => {
+    // Check secure context (mandatory for mobile browser geolocation)
+    if (
+      typeof window !== 'undefined' &&
+      window.isSecureContext === false &&
+      window.location.hostname !== 'localhost' &&
+      window.location.hostname !== '127.0.0.1'
+    ) {
+      const errorMsg =
+        'Geolocation requires HTTPS or localhost. If opening over LAN on mobile, please use localhost or HTTPS.';
+      setSensorState((prev) => ({ ...prev, error: errorMsg }));
+      return null;
+    }
+
+    // Tier 1: High Accuracy GPS (satellites / outdoor mobile)
+    try {
+      const pos = await fetchBrowserPosition({
+        enableHighAccuracy: true,
+        timeout: 7000,
+        maximumAge: 30000,
+      });
+      const coords: Coordinates = {
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+      };
+      globalLastKnownLocation = coords;
+      setSensorState((prev) => ({
+        ...prev,
+        userLocation: coords,
+        accuracy: pos.coords.accuracy,
+        error: null,
+        permissionGranted: true,
+      }));
+      return coords;
+    } catch (highErr) {
+      console.warn('High-accuracy GPS fix failed or timed out; falling back to network/Wi-Fi...', highErr);
+    }
+
+    // Tier 2: Low Accuracy (Wi-Fi triangulation / cellular / standard browser)
+    try {
+      const pos = await fetchBrowserPosition({
+        enableHighAccuracy: false,
+        timeout: 10000,
+        maximumAge: 60000,
+      });
+      const coords: Coordinates = {
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+      };
+      globalLastKnownLocation = coords;
+      setSensorState((prev) => ({
+        ...prev,
+        userLocation: coords,
+        accuracy: pos.coords.accuracy,
+        error: null,
+        permissionGranted: true,
+      }));
+      return coords;
+    } catch (stdErr) {
+      console.warn('Browser network location failed; attempting IP-based fallback...', stdErr);
+    }
+
+    // Tier 3: IP Geolocation (ideal for desktop PCs without GPS chips or Wi-Fi scanning)
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const resp = await fetch('https://ipwho.is/', { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (resp.ok) {
+        const data = await resp.json();
+        if (
+          data &&
+          data.success &&
+          typeof data.latitude === 'number' &&
+          typeof data.longitude === 'number'
+        ) {
+          const coords: Coordinates = {
+            lat: data.latitude,
+            lng: data.longitude,
+          };
+          globalLastKnownLocation = coords;
+          setSensorState((prev) => ({
+            ...prev,
+            userLocation: coords,
+            accuracy: 1000,
+            error: null,
+            permissionGranted: true,
+          }));
+          return coords;
+        }
+      }
+    } catch (ipErr) {
+      console.warn('IP geolocation fallback failed or unreachable:', ipErr);
+    }
+
+    // All attempts failed
+    const finalErr =
+      'Unable to acquire location automatically. Please check browser permissions or select a city location.';
+    setSensorState((prev) => ({ ...prev, error: finalErr }));
+    return null;
+  }, []);
+
+  // Manual coordinate override (e.g., city center fallback button)
+  const setManualLocation = useCallback((coords: Coordinates) => {
+    globalLastKnownLocation = coords;
+    setSensorState((prev) => ({
+      ...prev,
+      userLocation: coords,
+      accuracy: 10,
+      error: null,
+      permissionGranted: true,
+    }));
+  }, []);
+
+  // -------------------------------------------------------------
+  // 3. HAPTICS HELPERS
   // -------------------------------------------------------------
   const triggerHapticFeedback = async (style: ImpactStyle = ImpactStyle.Light) => {
     try {
@@ -109,10 +241,10 @@ export function useSensors(targetLocation?: Coordinates | null) {
   };
 
   // -------------------------------------------------------------
-  // 3. LIFECYCLE: SETUP ORIENTATION & GPS WATCH
+  // 4. LIFECYCLE: SETUP ORIENTATION & RESILIENT GPS WATCH
   // -------------------------------------------------------------
   useEffect(() => {
-    let watchId: string | null = null;
+    let watchId: number | null = null;
     let isMounted = true;
     const orientationEventName =
       'ondeviceorientationabsolute' in window
@@ -131,37 +263,57 @@ export function useSensors(targetLocation?: Coordinates | null) {
         );
       }
 
-      // B. Setup High-Accuracy GPS Watch
-      try {
-        const id = await Geolocation.watchPosition(
-          {
-            enableHighAccuracy: true,
-            timeout: 10000,
-            maximumAge: 1000,
-          },
-          (position: Position | null, err) => {
-            if (err) {
-              if (isMounted) setSensorState((prev) => ({ ...prev, error: err.message }));
-              return;
-            }
+      // B. Proactively acquire location if not yet resolved
+      if (!globalLastKnownLocation && !initialUserLocation) {
+        acquireLocation();
+      }
 
-            if (position && isMounted) {
-              setSensorState((prev) => ({
-                ...prev,
-                userLocation: {
-                  lat: position.coords.latitude,
-                  lng: position.coords.longitude,
-                },
-                accuracy: position.coords.accuracy,
-                error: null,
-              }));
-            }
+      // C. Setup Continuous GPS Watch with resilient fallback
+      if (typeof navigator !== 'undefined' && navigator.geolocation) {
+        let isHighAcc = true;
+        const startWatch = () => {
+          try {
+            const id = navigator.geolocation.watchPosition(
+              (pos) => {
+                if (!isMounted) return;
+                const coords: Coordinates = {
+                  lat: pos.coords.latitude,
+                  lng: pos.coords.longitude,
+                };
+                globalLastKnownLocation = coords;
+                setSensorState((prev) => ({
+                  ...prev,
+                  userLocation: coords,
+                  accuracy: pos.coords.accuracy,
+                  error: null,
+                  permissionGranted: true,
+                }));
+              },
+              (err) => {
+                if (!isMounted) return;
+                console.warn(`watchPosition (${isHighAcc ? 'high-acc' : 'low-acc'}) error:`, err);
+                if (isHighAcc) {
+                  // Fall back from satellite to network watch
+                  isHighAcc = false;
+                  navigator.geolocation.clearWatch(id);
+                  startWatch();
+                } else if (!globalLastKnownLocation) {
+                  setSensorState((prev) => ({ ...prev, error: err.message }));
+                }
+              },
+              {
+                enableHighAccuracy: isHighAcc,
+                timeout: isHighAcc ? 15000 : 30000,
+                maximumAge: 10000,
+              }
+            );
+            watchId = id;
+          } catch (e) {
+            console.warn('Failed to start watchPosition:', e);
           }
-        );
-        watchId = id;
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (isMounted) setSensorState((prev) => ({ ...prev, error: message }));
+        };
+
+        startWatch();
       }
     }
 
@@ -175,11 +327,11 @@ export function useSensors(targetLocation?: Coordinates | null) {
         handleOrientation as unknown as EventListener,
         true
       );
-      if (watchId !== null) {
-        Geolocation.clearWatch({ id: watchId });
+      if (watchId !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
+        navigator.geolocation.clearWatch(watchId);
       }
     };
-  }, [handleOrientation]);
+  }, [handleOrientation, acquireLocation, initialUserLocation]);
 
   // -------------------------------------------------------------
   // 4. COMPUTED MATH: BEARING, DISTANCE & HAPTIC ALIGNMENT
@@ -250,6 +402,8 @@ export function useSensors(targetLocation?: Coordinates | null) {
     turnDirection,
     isDrifting,
     requestCompassPermission,
+    acquireLocation,
+    setManualLocation,
   };
 }
 

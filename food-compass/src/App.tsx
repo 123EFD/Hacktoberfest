@@ -4,7 +4,7 @@ import {
   searchWithPreferenceFallback,
   type FoodPreferences,
 } from './services/osmServices';
-import { useSensors } from './hooks/useSensors';
+import { useSensors, type Coordinates } from './hooks/useSensors';
 
 interface EateryTarget {
   name: string;
@@ -40,13 +40,32 @@ export default function App() {
     spice: 'any',
   });
 
-  // Hook into sensors for user's starting GPS location
-  const { userLocation, permissionGranted, requestCompassPermission } = useSensors();
+  // Hook into sensors for user's starting GPS location & active acquisition
+  const {
+    userLocation,
+    permissionGranted,
+    requestCompassPermission,
+    acquireLocation,
+    setManualLocation,
+    error: sensorError,
+  } = useSensors();
 
   // Discover live nearby eateries with automatic preference fallback
-  const handleFindStroll = async () => {
-    if (!userLocation) {
-      setStatusMessage('Acquiring your GPS position... please allow location permissions.');
+  const handleFindStroll = async (overrideCoords?: Coordinates) => {
+    let loc = overrideCoords || userLocation;
+
+    if (!loc) {
+      setIsLoading(true);
+      setStatusMessage('Acquiring your GPS position... please allow location permissions if prompted.');
+      loc = await acquireLocation();
+    }
+
+    if (!loc) {
+      setIsLoading(false);
+      setStatusMessage(
+        sensorError ||
+          'Unable to detect GPS position. Please check browser location permissions or choose a city below.'
+      );
       return;
     }
 
@@ -55,8 +74,8 @@ export default function App() {
 
     try {
       const result = await searchWithPreferenceFallback(
-        userLocation.lat,
-        userLocation.lng,
+        loc.lat,
+        loc.lng,
         preferences
       );
 
@@ -94,6 +113,7 @@ export default function App() {
     return (
       <WalkScreen
         target={activeTarget}
+        initialUserLocation={userLocation}
         onCancel={() => {
           setActiveTarget(null);
           setStatusMessage(null);
@@ -201,6 +221,7 @@ export default function App() {
         {/* Sensor Permission Button */}
         {!permissionGranted && (
           <button
+            type="button"
             onClick={requestCompassPermission}
             className="w-full py-3 px-4 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-2xl text-xs shadow-lg active:scale-95 transition-all"
           >
@@ -208,19 +229,62 @@ export default function App() {
           </button>
         )}
 
+        {/* GPS Live Status Indicator */}
+        <div className="flex items-center justify-between px-2 text-[11px] text-slate-400">
+          <span>GPS Sensor:</span>
+          {userLocation ? (
+            <span className="text-emerald-400 font-semibold flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]"></span>
+              GPS Locked ({userLocation.lat.toFixed(4)}, {userLocation.lng.toFixed(4)})
+            </span>
+          ) : (
+            <span className="text-amber-400 font-medium flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+              Waiting for GPS fix...
+            </span>
+          )}
+        </div>
+
         {/* Main Search Action */}
         <button
-          onClick={handleFindStroll}
+          onClick={() => handleFindStroll()}
           disabled={isLoading}
           className="w-full py-4 px-6 bg-emerald-600 hover:bg-emerald-500 text-white font-black rounded-2xl text-base shadow-lg shadow-emerald-600/25 active:scale-95 transition-all disabled:opacity-50"
         >
-          {isLoading ? 'Scanning Local Vibe...' : '🚶 Find Best Food Walk (800m)'}
+          {isLoading
+            ? 'Scanning Local Vibe...'
+            : userLocation
+            ? '🚶 Find Best Food Walk (800m)'
+            : '📍 Acquire GPS & Find Food Walk'}
         </button>
 
         {statusMessage && (
-          <p className="text-xs text-center text-amber-300 bg-amber-950/40 border border-amber-900/50 p-2.5 rounded-xl">
-            {statusMessage}
-          </p>
+          <div className="text-xs text-center text-amber-300 bg-amber-950/40 border border-amber-900/50 p-3 rounded-xl flex flex-col gap-2">
+            <p>{statusMessage}</p>
+            {!userLocation && (
+              <div className="flex gap-2 justify-center pt-1">
+                <button
+                  type="button"
+                  onClick={() => acquireLocation()}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 active:scale-95 transition-all"
+                >
+                  🔄 Retry GPS Detection
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    // Default to Bukit Bintang, Kuala Lumpur food street hub
+                    const defaultCoords = { lat: 3.1466, lng: 101.7115 };
+                    setManualLocation(defaultCoords);
+                    handleFindStroll(defaultCoords);
+                  }}
+                  className="px-3 py-1.5 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 text-xs font-semibold rounded-lg border border-emerald-800 active:scale-95 transition-all"
+                >
+                  📍 Use City Center (KL)
+                </button>
+              </div>
+            )}
+          </div>
         )}
       </section>
 
