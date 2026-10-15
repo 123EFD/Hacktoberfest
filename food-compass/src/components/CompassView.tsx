@@ -119,11 +119,28 @@ export const CompassView: React.FC<CompassViewProps> = ({
             : 'border-slate-800 bg-slate-900/40'
         }`}
       >
-        {/* Cardinal tick marks */}
-        <div className="absolute top-2 left-1/2 -translate-x-1/2 w-1 h-3 bg-slate-600 rounded" />
-        <div className="absolute bottom-2 left-1/2 -translate-x-1/2 w-1 h-3 bg-slate-600 rounded" />
-        <div className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-1 bg-slate-600 rounded" />
-        <div className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-1 bg-slate-600 rounded" />
+        {/* Cardinal tick marks & labels */}
+        <div className="absolute top-2 left-1/2 -translate-x-1/2 flex flex-col items-center">
+          <span className="text-[10px] font-black text-rose-400 leading-none mb-0.5">N</span>
+          <div className="w-1 h-2 bg-rose-500 rounded" />
+        </div>
+        <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex flex-col items-center">
+          <div className="w-1 h-2 bg-slate-600 rounded mb-0.5" />
+          <span className="text-[10px] font-bold text-slate-500 leading-none">S</span>
+        </div>
+        <div className="absolute left-2 top-1/2 -translate-y-1/2 flex items-center">
+          <span className="text-[10px] font-bold text-slate-500 leading-none mr-1">W</span>
+          <div className="w-2 h-1 bg-slate-600 rounded" />
+        </div>
+        <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center">
+          <div className="w-2 h-1 bg-slate-600 rounded mr-1" />
+          <span className="text-[10px] font-bold text-slate-500 leading-none">E</span>
+        </div>
+
+        {/* Center Pivot Point */}
+        <div className="absolute w-4 h-4 rounded-full bg-slate-900 border-2 border-slate-700 z-10 shadow-sm flex items-center justify-center">
+          <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+        </div>
 
         {/* Needle Arrow rotates smoothly */}
         <div

@@ -62,42 +62,106 @@ export function useSensors(
   // 1. COMPASS / DEVICE ORIENTATION
   // -------------------------------------------------------------
   const handleOrientation = useCallback((event: DeviceOrientationEvent) => {
-    let compassHeading = 0;
-
-    // iOS Safari / WebKit provides direct 0-360 compass heading
+    let compassHeading: number | null = null;
     const webkitEvent = event as WebKitDeviceOrientationEvent;
-    if (typeof webkitEvent.webkitCompassHeading === 'number') {
+
+    // 1. iOS Safari webkitCompassHeading (0 = True North, clockwise)
+    if (
+      typeof webkitEvent.webkitCompassHeading === 'number' &&
+      !isNaN(webkitEvent.webkitCompassHeading)
+    ) {
       compassHeading = webkitEvent.webkitCompassHeading;
     }
-    // Android / Standard W3C Specification
-    else if (event.alpha !== null) {
-      // On Android, alpha is 0 when pointing North, but increases counter-clockwise
+    // 2. Android / Standard alpha orientation
+    else if (event.alpha !== null && !isNaN(event.alpha)) {
       compassHeading = (360 - event.alpha) % 360;
     }
 
-    setSensorState((prev) => ({
-      ...prev,
-      heading: Math.round(compassHeading),
-    }));
+    if (compassHeading !== null) {
+      setSensorState((prev) => ({
+        ...prev,
+        heading: Math.round(compassHeading!),
+        permissionGranted: true,
+      }));
+    }
   }, []);
 
+  const attachOrientationListeners = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    window.addEventListener(
+      'deviceorientationabsolute',
+      handleOrientation as unknown as EventListener,
+      true
+    );
+    window.addEventListener(
+      'deviceorientation',
+      handleOrientation as unknown as EventListener,
+      true
+    );
+  }, [handleOrientation]);
+
   // Request permission for iOS 13+ devices
-  const requestCompassPermission = async (): Promise<boolean> => {
+  const requestCompassPermission = useCallback(async (): Promise<boolean> => {
     if (typeof DeviceOrientationEvent !== 'undefined') {
-      const orientationConstructor = DeviceOrientationEvent as unknown as DeviceOrientationEventWithPermission;
+      const orientationConstructor =
+        DeviceOrientationEvent as unknown as DeviceOrientationEventWithPermission;
       if (typeof orientationConstructor.requestPermission === 'function') {
         try {
           const response = await orientationConstructor.requestPermission();
-          return response === 'granted';
+          if (response === 'granted') {
+            attachOrientationListeners();
+            setSensorState((prev) => ({ ...prev, permissionGranted: true }));
+            return true;
+          }
+          return false;
         } catch (err) {
-          console.error('iOS Orientation permission denied:', err);
+          console.error('iOS Orientation permission error:', err);
           return false;
         }
       }
     }
-    // Android and non-iOS browsers don't require explicit popup permission
+    // Android and desktop browsers
+    attachOrientationListeners();
+    setSensorState((prev) => ({ ...prev, permissionGranted: true }));
     return true;
-  };
+  }, [attachOrientationListeners]);
+
+  // Manual heading rotation (for laptop / desktop testing)
+  const setManualHeading = useCallback((newHeading: number) => {
+    const normalized = ((newHeading % 360) + 360) % 360;
+    setSensorState((prev) => ({
+      ...prev,
+      heading: Math.round(normalized),
+    }));
+  }, []);
+
+  // Step simulation towards target (for desktop testing or couch demo)
+  const simulateStep = useCallback(
+    (stepMeters = 15) => {
+      setSensorState((prev) => {
+        if (!prev.userLocation || !targetLocation) return prev;
+        const currentDist = calculateDistance(prev.userLocation, targetLocation);
+        if (currentDist <= stepMeters) {
+          return {
+            ...prev,
+            userLocation: { ...targetLocation },
+          };
+        }
+        const ratio = stepMeters / currentDist;
+        const newLat =
+          prev.userLocation.lat + (targetLocation.lat - prev.userLocation.lat) * ratio;
+        const newLng =
+          prev.userLocation.lng + (targetLocation.lng - prev.userLocation.lng) * ratio;
+        const newCoords = { lat: newLat, lng: newLng };
+        globalLastKnownLocation = newCoords;
+        return {
+          ...prev,
+          userLocation: newCoords,
+        };
+      });
+    },
+    [targetLocation]
+  );
 
   // -------------------------------------------------------------
   // 2. MULTI-TIER GPS ACQUISITION (HIGH-ACCURACY -> NETWORK -> IP)
@@ -246,25 +310,21 @@ export function useSensors(
   useEffect(() => {
     let watchId: number | null = null;
     let isMounted = true;
-    const orientationEventName =
-      'ondeviceorientationabsolute' in window
-        ? 'deviceorientationabsolute'
-        : 'deviceorientation';
 
     async function initSensors() {
-      // A. Setup Orientation
-      const granted = await requestCompassPermission();
-      if (granted && isMounted) {
-        setSensorState((prev) => ({ ...prev, permissionGranted: true }));
-        window.addEventListener(
-          orientationEventName,
-          handleOrientation as unknown as EventListener,
-          true
-        );
+      // A. Setup Orientation (on non-iOS, attach automatically)
+      const isIOSWithPermission =
+        typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof (
+          DeviceOrientationEvent as unknown as DeviceOrientationEventWithPermission
+        ).requestPermission === 'function';
+
+      if (!isIOSWithPermission) {
+        attachOrientationListeners();
       }
 
       // B. Proactively acquire location if not yet resolved
-      if (!globalLastKnownLocation && !initialUserLocation) {
+      if (!globalLastKnownLocation) {
         acquireLocation();
       }
 
@@ -281,12 +341,22 @@ export function useSensors(
                   lng: pos.coords.longitude,
                 };
                 globalLastKnownLocation = coords;
+
+                // When moving, GPS ground course gives true travel direction
+                const gpsHeading =
+                  typeof pos.coords.heading === 'number' &&
+                  !isNaN(pos.coords.heading) &&
+                  pos.coords.heading >= 0
+                    ? Math.round(pos.coords.heading)
+                    : null;
+
                 setSensorState((prev) => ({
                   ...prev,
                   userLocation: coords,
                   accuracy: pos.coords.accuracy,
                   error: null,
                   permissionGranted: true,
+                  heading: gpsHeading !== null ? gpsHeading : prev.heading,
                 }));
               },
               (err) => {
@@ -304,7 +374,7 @@ export function useSensors(
               {
                 enableHighAccuracy: isHighAcc,
                 timeout: isHighAcc ? 15000 : 30000,
-                maximumAge: 10000,
+                maximumAge: 3000,
               }
             );
             watchId = id;
@@ -323,7 +393,12 @@ export function useSensors(
     return () => {
       isMounted = false;
       window.removeEventListener(
-        orientationEventName,
+        'deviceorientationabsolute',
+        handleOrientation as unknown as EventListener,
+        true
+      );
+      window.removeEventListener(
+        'deviceorientation',
         handleOrientation as unknown as EventListener,
         true
       );
@@ -331,10 +406,10 @@ export function useSensors(
         navigator.geolocation.clearWatch(watchId);
       }
     };
-  }, [handleOrientation, acquireLocation, initialUserLocation]);
+  }, [handleOrientation, attachOrientationListeners, acquireLocation]);
 
   // -------------------------------------------------------------
-  // 4. COMPUTED MATH: BEARING, DISTANCE & HAPTIC ALIGNMENT
+  // 5. COMPUTED MATH: BEARING, DISTANCE & HAPTIC ALIGNMENT
   // -------------------------------------------------------------
   let distanceMeters = 0;
   let targetBearing = 0;
@@ -344,9 +419,12 @@ export function useSensors(
   const minDistanceRef = useRef<number | null>(null);
   const [isDrifting, setIsDrifting] = useState(false);
 
-  if (sensorState.userLocation && targetLocation) {
-    distanceMeters = calculateDistance(sensorState.userLocation, targetLocation);
-    targetBearing = calculateBearing(sensorState.userLocation, targetLocation);
+  const effectiveUserLocation =
+    sensorState.userLocation || initialUserLocation || globalLastKnownLocation;
+
+  if (effectiveUserLocation && targetLocation) {
+    distanceMeters = calculateDistance(effectiveUserLocation, targetLocation);
+    targetBearing = calculateBearing(effectiveUserLocation, targetLocation);
 
     // Needle points to (Target Bearing - Phone's Heading)
     needleAngle = (targetBearing - sensorState.heading + 360) % 360;
@@ -378,7 +456,7 @@ export function useSensors(
 
   // Handle Haptic Walking Feedback Loop
   useEffect(() => {
-    if (!targetLocation || !sensorState.userLocation) return;
+    if (!targetLocation || !effectiveUserLocation) return;
 
     // Feedback 1: Haptic pulse when user points in the right walking direction
     if (isFacingTarget && !wasFacingTargetRef.current) {
@@ -391,10 +469,11 @@ export function useSensors(
       hasArrivedRef.current = true;
       triggerArrivalHaptic();
     }
-  }, [isFacingTarget, distanceMeters, targetLocation, sensorState.userLocation]);
+  }, [isFacingTarget, distanceMeters, targetLocation, effectiveUserLocation]);
 
   return {
     ...sensorState,
+    userLocation: effectiveUserLocation,
     distanceMeters,
     targetBearing,
     needleAngle,
@@ -404,6 +483,8 @@ export function useSensors(
     requestCompassPermission,
     acquireLocation,
     setManualLocation,
+    setManualHeading,
+    simulateStep,
   };
 }
 
